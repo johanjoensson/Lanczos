@@ -2,6 +2,20 @@ import scipy.linalg as la
 import numpy as np
 import scipy as sp
 
+from lanczos_util import estimate_orthonormality, zgemm, orthogonalize, hermitian_csr_matmat
+
+class Hermitian_operator(sp.sparse.linalg.LinearOperator):
+    def __init__(self, H):
+        self.shape = H.shape
+        self.U = sp.sparse.tril(H, k = 0, format = 'csr')
+        self.dtype = H.dtype
+
+    def _matmat(self, m):
+        return hermitian_csr_matmat(self.shape[0], self.U.data, self.U.indices, self.U.indptr, m)
+
+    def _adjoint(self):
+        return self
+
 
 class LanczosGen:
     import numpy as np
@@ -39,12 +53,13 @@ class LanczosGen:
         v_new -= self.v @ alpha + self.v_old @ np.conj(self.beta.T)
 
         self.v_old = self.v
-        self.v, self.beta = np.linalg.qr(v_new, mode="reduced")
+        q, r = sp.linalg.qr(v_new, mode="full", overwrite_a = True, check_finite = False)
+        self.v, self.beta = q[:, :self.v.shape[1]], r[:self.beta.shape[0], :]
 
         return alpha, self.beta, self.v
 
 
-def estimate_orthonormality(
+def estimate_orthonormality_old(
     W, alphas, betas, eps=np.finfo(float).eps, N=1, rng=np.random.default_rng()
 ):
     """Estimate the overlap between obtained Lanczos vectors at a ceratin iteration.
@@ -73,9 +88,10 @@ def estimate_orthonormality(
     w_bar[i, :, :] = (
         eps
         * N
-        * np.linalg.solve(np.conj(betas[i].T), betas[0])
-        * 0.6
-        * rng.standard_normal(size=(n, n))
+        * sp.linalg.solve_triangular(betas[i], betas[0], lower = False, trans = 'C', check_finite = False)
+        # * sp.linalg.solve_triangular(np.conj(betas[i].T), betas[0], lower = True)
+        # * 0.6
+        # * rng.standard_normal(size=(n, n))
     )
     if i == 0:
         W_out[0, : i + 1] = W[1]
@@ -83,32 +99,25 @@ def estimate_orthonormality(
         return W_out
 
     if n > 1:
-        # For block Lanczos, looping over the blocks is faster than einsum, or broadcasting
         w_bar[0] = (
             W[1, 1] @ betas[0]
             + W[1, 0] @ alphas[0]
             - alphas[i] @ W[1, 0]
             - betas[i - 1] @ W[0, 0]
         )
-        w_bar[0] = np.linalg.solve(np.conj(betas[i].T), w_bar[0])
+        w_bar[0] = sp.linalg.solve_triangular(betas[i], w_bar[0], lower = False, trans = 'C', check_finite = False)
+        # w_bar[0] = sp.linalg.solve_triangular(np.conj(betas[i].T), w_bar[0], lower = True)
+        w_bar[1:i] = (
+            W[1, 2 : i + 1] @ betas[1:i]
+            + W[1, 1:i] @ alphas[1:i]
+            - alphas[i][np.newaxis, :, :] @ W[1, 1:i]
+            + W[1, 0 : i - 1] @ np.conj(np.transpose(betas[0 : i - 1], axes=[0, 2, 1]))
+            - betas[i - 1][np.newaxis, :, :] @ W[0, 1:i]
+        )
         for j in range(1, i):
-            w_bar[j] = (
-                W[1, j + 1] @ betas[j]
-                + W[1, j] @ alphas[j]
-                - alphas[i] @ W[1, j]
-                + W[1, j - 1] @ np.conj(betas[j - 1].T)
-                - betas[i - 1] @ W[0, j]
-            )
-            w_bar[j] = np.linalg.solve(np.conj(betas[i].T), w_bar[j])
-        # w_bar[0] = W[1, 1] * np.linalg.norm(betas[0], ord = 2) + W[1, 0] * np.linalg.norm(alphas[0], ord = 2) +\
-        #            np.linalg.norm(alphas[i], ord = 2) * W[1, 0] -\
-        #            np.linalg.norm(betas[i-1], ord = 2) * W[0, 0]
-        # w_bar[0] = np.linalg.norm(np.linalg.inv(betas[i]), ord = 2) * w_bar[0]
-        # for j in range(1,i):
-        #     w_bar[j] = W[1, j+1] * np.linalg.norm(betas[j], ord =2) + W[1, j] * np.linalg.norm(alphas[j], ord = 2) +\
-        #                np.linalg.norm(alphas[i], ord = 2) * W[1, j] + W[1, j-1] * np.linalg.norm(betas[j-1], ord = 2) +\
-        #                np.linalg.norm(betas[i-1], ord = 2) * W[0, j]
-        #     w_bar[j] = np.linalg.norm(np.linalg.inv(betas[i]), ord = 2) * w_bar[j]
+            w_bar[j] = sp.linalg.solve_triangular(betas[i], w_bar[j], lower = False, trans = 'C', check_finite = False)
+            # w_bar[j] = sp.linalg.solve_triangular(np.conj(betas[i].T), w_bar[j], lower = True)
+        # w_bar[1:i] = np.linalg.solve(np.conj(betas[i].T)[np.newaxis, :, :], w_bar[1:i])
     elif n == 1:
         # For standard Lanczos, broadcasting is faster than looping
         w_bar[:i] = (
@@ -124,24 +133,12 @@ def estimate_orthonormality(
         w_bar[:i] = w_bar[:i] / betas[i]
 
     w_bar[:i] += (
-        eps * (betas[i] + betas[:i]) * 0.3 * rng.standard_normal(size=(i, n, n))
+        eps * (betas[i] + betas[:i]) # * 0.3 * rng.standard_normal(size=(i, n, n))
     )
     W_out[0, : i + 1] = W[1]
     W_out[1, : i + 2] = w_bar
 
     return W_out
-
-
-def orthogonalize(q, Q):
-    """Reorthonormalise the vector blocks in q against all vectors in Q.
-    Parameters:
-    q        - Array containing the vectors to reorthonormalise. Dimensions (M, N, n)
-    Q        - Matrix containing the column vectors to orthogonalize against. Dimensions (N, n)
-    Returns:
-    q_ort    - Orthonormal vector blocks, orthogonal to all vectors in Q. Dimensions (M, N, n)
-    """
-    return q - Q @ (np.conj(Q.T) @ q)
-
 
 def ric(
     W,
@@ -182,8 +179,8 @@ def ric(
     W[1, :-1][reset_mask] = (
         eps * 1.5 * rng.standard_normal(size=W[1, :-1][reset_mask].shape)
     )
-
-    return W, orthogonalize(q, y[:, mask]), np.any(reort_mask)
+    orthogonalize(q, y[:, mask].copy())
+    return W, q, np.any(reort_mask)
 
 
 def partial_reorthonormalization(
@@ -210,7 +207,8 @@ def partial_reorthonormalization(
     i = Q.shape[1] // n - 2
     reort = np.any(np.abs(W[1, :-1]) > np.sqrt(eps))
     if reort:
-        mask = np.any(np.abs(W[1, :-1]) > eps ** (3 / 4), axis=1)
+        # mask = np.any(np.abs(W[1, :-1]) > eps ** (3 / 4), axis=1)
+        mask = np.array([[True] * n] * (i + 2))
     else:
         mask = np.array([[False] * n] * (i + 2))
 
@@ -219,12 +217,13 @@ def partial_reorthonormalization(
     )
     # Update orthonormality estimates
     W[1, :-1][combined_mask] = (
-        eps * 1.5 * rng.standard_normal(size=W[1, :-1][combined_mask].shape)
+        eps # * 1.5 * rng.standard_normal(size=W[1, :-1][combined_mask].shape)
     )
 
+    # orthogonalize(q=q, Q=Q[:, combined_mask.flatten()].copy()),
     return (
         W,
-        orthogonalize(q=q, Q=Q[:, combined_mask.flatten()]),
+        q - Q[:, combined_mask.flatten()] @ (np.conj(Q[:, combined_mask.flatten()].T) @ q),
         mask if reort else None,
     )
 
@@ -312,13 +311,10 @@ def converged(alphas, betas, k, tol):
     if n * block_size < k:
         return False
 
-    try:
-        if len(alphas.shape) == 1:
-            errors = errors_scalar(alphas, betas, k)
-        else:
-            errors = errors_block(alphas, betas, k)
-    except np.linalg.LinAlgError as er:
-        return False
+    if len(alphas.shape) == 1:
+        errors = errors_scalar(alphas, betas, k)
+    else:
+        errors = errors_block(alphas, betas, k)
     return np.all(errors < tol)
 
 
@@ -338,6 +334,7 @@ def bench_lanczos(
     eigvals = np.zeros((0, k))
     estimated_orth = []
     exact_orth = []
+    delta_gs = []
     alphas = np.zeros((0, n, n), dtype=complex)
     betas = np.zeros((0, n, n), dtype=complex)
     Q = np.empty((N, n), dtype=complex)
@@ -360,7 +357,8 @@ def bench_lanczos(
             or force_reort is not None
             or np.any(np.abs(W[1, :-1]) > np.sqrt(eps))
         ):
-            q = q @ beta
+            if partial_reorth or improved_conv:
+                q = q @ beta
 
             if partial_reorth:
                 if force_reort is not None:
@@ -374,14 +372,17 @@ def bench_lanczos(
                     W, alphas, betas, Q, q, force_reort=None, eps=eps, rng=rng
                 )
 
-            q, betas[-1] = np.linalg.qr(q)
-
-            lanczos_it.beta = betas[-1]
-            lanczos_it.v = q
+            if partial_reorth or improved_conv:
+                v, r = sp.linalg.qr(q, mode = 'full', overwrite_a = True, check_finite = False)
+                q, betas[-1, :, :] = v[:, :n], r[:n, :]
+                # q, betas[-1, :, :] = np.linalg.qr(q)
+                lanczos_it.beta = betas[-1]
+                lanczos_it.v = q
         Q = np.append(Q, q, axis=1)
+        delta_gs.append(test_G(alphas, betas))
 
-        if converged(alphas, betas, k, tol=eps):
-            break
+        # if converged(alphas, betas, k, tol=eps):
+        #     break
 
     t_stop = perf_counter()
 
@@ -406,6 +407,7 @@ def bench_lanczos(
 
     results = {
         "eigenvalues": eigvals,
+        "delta G": delta_gs,
         "estimated orth": estimated_orth,
         "exact orth": exact_orth,
         "t": t_stop - t_start,
@@ -414,30 +416,74 @@ def bench_lanczos(
     return results
 
 
+def test_G(alphas, betas):
+    delta = 0.010j
+    omegas = np.linspace(-1, 0.5, 100)
+
+    n = alphas.shape[1]
+    wIs = (omegas + delta)[:, np.newaxis, np.newaxis] * np.identity(n, dtype=complex)[
+        np.newaxis, :, :
+    ]
+    gs_new = wIs - alphas[-1]
+    if alphas.shape[0] == 1:
+        return np.max(np.abs(gs_new))
+    gs_new = (
+        wIs
+        - alphas[-2]
+        - np.conj(betas[-2].T)[np.newaxis, :, :]
+        @ np.linalg.solve(gs_new, betas[-2][np.newaxis, :, :])
+    )
+    gs_prev = wIs - alphas[-2]
+    for alpha, beta in zip(alphas[-3::-1], betas[-3::-1]):
+        gs_new = (
+            wIs
+            - alpha
+            - np.conj(beta.T)[np.newaxis, :, :]
+            @ np.linalg.solve(gs_new, beta[np.newaxis, :, :])
+        )
+        gs_prev = (
+            wIs
+            - alpha
+            - np.conj(beta.T)[np.newaxis, :, :]
+            @ np.linalg.solve(gs_prev, beta[np.newaxis, :, :])
+        )
+    return np.max(np.abs(gs_new - gs_prev))
+
+
 def reorthogonalize_plot(N=5000, max_degeneracy=1, n=1, k=10, krylov_size=1200):
+    from scipy import stats
     import scipy.sparse.linalg as spl
+    from numpy.random import default_rng
 
     eps = np.finfo(float).eps
 
-    eigvals = np.sort(
-        [
-            4
-            * (
-                np.sin(np.pi * i / (2 * (max_degeneracy + 1))) ** 2
-                + np.sin(np.pi * j / (2 * (N // max_degeneracy + 1))) ** 2
-            )
-            for i in range(1, max_degeneracy + 1)
-            for j in range(1, N // max_degeneracy + 1)
-        ]
-    )
-    A = sp.sparse.diags(eigvals)
-    v0 = np.random.rand(N, n) + 1j * np.random.rand(N, n)
-    v0, _ = np.linalg.qr(v0, mode="reduced")
+    # eigvals = [np.arange(0, N//max_degeneracy)]*max_degeneracy
+    # eigvals = np.append(eigvals, [N//max_degeneracy + np.arange((N%max_degeneracy)*max_degeneracy)])
+    # eigvals = np.sort(eigvals)
+    # print (f"eigvals.shape = {eigvals.shape}")
+    # A = sp.sparse.diags(eigvals)
+    # rng = default_rng()
+    # rvs = stats.norm(loc = 0, scale = 100).rvs
+    # A = (
+    #              sp.sparse.random(N, N, density=0.001,  dtype=complex, random_state = rng, data_rvs = rvs)
+    #         + 1j*sp.sparse.random(N, N, density=0.001,  dtype=complex, random_state = rng, data_rvs = rvs)
+    #         ).tocsr()
+    # A @= A.H
+    eigvals = np.repeat(np.arange(np.ceil(N/max_degeneracy)), max_degeneracy)[:N]
+    A = sp.sparse.diags(eigvals, format = 'csr', dtype = complex)
+    hamiltonian = Hermitian_operator(A)
+    init_block = np.random.rand(N, n)  + 1j*np.random.rand(N, n)
+    init_block[:, 0] = 1
+    v0, _ = sp.linalg.qr(init_block, mode="full", overwrite_a = True, check_finite = False)
+    v0 = v0[:, :n]
+
+    eigvals = np.sort(eigvals)
 
     results = {}
     print(f"No reort")
     results["no reorth"] = bench_lanczos(
-        A=A,
+        # A=A,
+        A=hamiltonian,
         v0=v0,
         k=k,
         krylov_size=krylov_size,
@@ -446,7 +492,8 @@ def reorthogonalize_plot(N=5000, max_degeneracy=1, n=1, k=10, krylov_size=1200):
     )
     print(f"Partial reort")
     results["partial reorth"] = bench_lanczos(
-        A=A,
+        # A=A,
+        A=hamiltonian,
         v0=v0,
         k=k,
         krylov_size=krylov_size,
@@ -474,6 +521,7 @@ def reorthogonalize_plot(N=5000, max_degeneracy=1, n=1, k=10, krylov_size=1200):
     # print(f"eigvals:\n{eigvals}")
 
     its = results["no reorth"]["eigenvalues"].shape[0]
+    krylov_space_size = range(0, its*n, n)
 
     import matplotlib.pyplot as plt
 
@@ -488,53 +536,73 @@ def reorthogonalize_plot(N=5000, max_degeneracy=1, n=1, k=10, krylov_size=1200):
     from matplotlib.markers import MarkerStyle
 
     sm = MarkerStyle("o", fillstyle="full")
-    fig, axes = plt.subplots(nrows=2, ncols=2, sharex="all", sharey="row")
-    #fig, axes = plt.subplots(nrows=2, ncols=4, sharex="all", sharey="row")
+    fig, axes = plt.subplots(nrows=3, ncols=2, sharex="all", sharey="row")
+    # fig, axes = plt.subplots(nrows=2, ncols=4, sharex="all", sharey="row")
     # plt.suptitle(
     #     f"Benchmarking of (block) Lanczos method\n(Matrix dimension, N = {N}; Block size, n = {n}; Krylov size = {krylov_size})"
     # )
     axes[0, 0].set_title(
         f"Without reorthogonalization\n(took {results['no reorth']['t']:.6f} seconds)"
     )
-    axes[0, 0].plot(results["no reorth"]["eigenvalues"], "--", marker=sm, alpha=0.3)
-    axes[0, 0].plot(range(its), [eigvals[:k]] * its, "--", color="black", alpha=0.3)
+    axes[0, 0].plot(krylov_space_size, results["no reorth"]["eigenvalues"], "--", marker=sm, alpha=0.3)
+    axes[0, 0].plot(krylov_space_size, [eigvals[:k]] * its, "--", color="black", alpha=0.3)
     axes[1, 0].plot(
-        np.log10(results["no reorth"]["estimated orth"]),
-        "--",
-        color="tab:blue",
-        label=r"$|\omega_{i + 1}|$",
-    )
+            krylov_space_size,
+            np.log10(results["no reorth"]["estimated orth"])[:-1],
+            "--",
+            color="tab:blue",
+            label=r"$|\omega_{i + 1}|$",
+            )
     axes[1, 0].plot(
-        np.log10(results["no reorth"]["exact orth"]),
-        "--",
-        color="tab:red",
-        label=r"$Q^{\dag}q_{i}$",
-    )
-    axes[1, 0].plot([np.log10(np.sqrt(eps))] * its, "--", color="black", alpha=0.3)
-    axes[1, 0].plot([np.log10(1.0)] * its, "--", color="black", alpha=0.1)
+            krylov_space_size,
+            np.log10(results["no reorth"]["exact orth"]),
+            "--",
+            color="tab:red",
+            label=r"$Q^{\dag}q_{i}$",
+            )
+    axes[1, 0].plot(krylov_space_size, [np.log10(np.sqrt(eps))] * its, "--", color="black", alpha=0.3)
+    axes[1, 0].plot(krylov_space_size, [np.log10(1.0)] * its, "--", color="black", alpha=0.1)
+    axes[2, 0].plot(
+            krylov_space_size,
+            np.log10(results["no reorth"]["delta G"])[:-1],
+            "--",
+            color="tab:blue",
+            label=r"$\Delta G$",
+            )
 
     axes[0, 1].set_title(
-        f"Partial reorthogonalization (PRO)\n(took {results['partial reorth']['t']:.6f} seconds)"
-    )
+            f"Partial reorthogonalization (PRO)\n(took {results['partial reorth']['t']:.6f} seconds)"
+            )
     axes[0, 1].plot(
-        results["partial reorth"]["eigenvalues"], "--", marker=sm, alpha=0.3
-    )
-    axes[0, 1].plot(range(its), [eigvals[:k]] * its, "--", color="black", alpha=0.3)
-    axes[1, 1].plot(
-        np.log10(results["partial reorth"]["estimated orth"]),
-        "--",
-        color="tab:blue",
-        label=r"$|\omega_{i + 1}|$",
-    )
-    axes[1, 1].plot(
-        np.log10(results["partial reorth"]["exact orth"]),
-        "--",
-        color="tab:red",
-        label=r"$Q^{\dag}q_{i}$",
-    )
-    axes[1, 1].plot([np.log10(np.sqrt(eps))] * its, "--", color="black", alpha=0.3)
-    axes[1, 1].plot([np.log10(1.0)] * its, "--", color="black", alpha=0.1)
+            krylov_space_size,
+            results["partial reorth"]["eigenvalues"], "--", marker=sm, alpha=0.3
+            )
+    axes[0, 1].plot(krylov_space_size, [eigvals[:k]] * its, "--", color="black", alpha=0.3)
 
+    axes[1, 1].plot(
+            krylov_space_size,
+            np.log10(results["partial reorth"]["estimated orth"])[:-1],
+            "--",
+            color="tab:blue",
+            label=r"$|\omega_{i + 1}|$",
+            )
+
+    axes[1, 1].plot(
+            krylov_space_size,
+            np.log10(results["partial reorth"]["exact orth"]),
+            "--",
+            color="tab:red",
+            label=r"$Q^{\dag}q_{i}$",
+            )
+    axes[1, 1].plot(krylov_space_size, [np.log10(np.sqrt(eps))] * its, "--", color="black", alpha=0.3)
+    axes[1, 1].plot(krylov_space_size, [np.log10(1.0)] * its, "--", color="black", alpha=0.1)
+    axes[2, 1].plot(
+            krylov_space_size,
+            np.log10(results["partial reorth"]["delta G"])[:-1],
+            "--",
+            color="tab:blue",
+            label=r"$\Delta G$",
+            )
     # axes[0, 2].set_title(
     #     f"Improved convergence (RIC)\n(took {results['reorth improved conv']['t']:.6f} seconds)"
     # )
@@ -582,14 +650,19 @@ def reorthogonalize_plot(N=5000, max_degeneracy=1, n=1, k=10, krylov_size=1200):
     # axes[1, 3].plot([np.log10(np.sqrt(eps))] * its, "--", color="black", alpha=0.3)
     # axes[1, 3].plot([np.log10(1.0)] * its, "--", color="black", alpha=0.1)
 
-    for row in axes:
-        for ax in row:
-            ax.set_xlabel("Iteration")
+    for ax in axes[-1, :]:
+        ax.set_xlabel("Krylov space size")
     for ax in axes[0, :]:
         ax.set_ylabel("Eigenvalues")
         ax.set_ylim(bottom=np.min(eigvals[:k]), top=np.max(eigvals[:k]))
     for ax in axes[1, :]:
-        ax.set_ylabel(r"$log_{10}|max\left(\left|\langle q_i | q_j\rangle\right|\right)|$")
+        ax.set_ylabel(
+            r"$log_{10}\left(max\left(\left|\langle q_i | q_j\rangle\right|\right)\right)$"
+        )
+        ax.legend()
+        ax.set_ylim(top=0)
+    for ax in axes[2, :]:
+        ax.set_ylabel(r"$log_{10}(\Delta G)$")
         ax.legend()
     plt.tight_layout()
     plt.show()
