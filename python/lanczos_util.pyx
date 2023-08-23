@@ -1,6 +1,8 @@
 import numpy as np
 cimport cython
-from libc.complex cimport conj
+# from libc.complex cimport conj
+cdef extern from "<complex.h>" nogil:
+    double complex conj(double complex z)
 
 cimport scipy.linalg.cython_blas as blas
 cimport  scipy.linalg.cython_lapack as lapack
@@ -20,11 +22,41 @@ cdef void csr_dense_matvec(const complex[:] csr_data, const int [:] csr_indices,
             # csr_val = A[row, k]
             k, csr_val = csr_indices[index] , csr_data[index]
             # csr_val_dag = A[k, row] = A[row, k]*
-            csr_val_dag = conj(csr_val)
             res[row] += csr_val*dense_v[k]
             # A[k, k] = A[k, k]* = A[k, k], don't add it twice
             if k != row:
-                res[k] += csr_val*dense_v[row]
+                res[k] += conj(csr_val)*dense_v[row]
+
+@cython.initializedcheck(False)
+@cython.boundscheck(False)
+@cython.wraparound(False)
+cdef void csr_dense_no_diagonal_matvec(const complex[:] csr_data, const int [:] csr_indices, const int[:] csr_index_ptr, const complex[:] dense_v, complex[:] res) noexcept:
+    cdef Py_ssize_t csr_rows = res.shape[0]
+    cdef Py_ssize_t csr_cols = dense_v.shape[0]
+    cdef Py_ssize_t row, k
+    cdef Py_ssize_t  col, index, indices_start, indices_end
+    cdef complex csr_val
+    for row in range(csr_rows):
+        indices_start, indices_end = csr_index_ptr[row], csr_index_ptr[row + 1]
+        for index in range(indices_start, indices_end):
+            # csr_val = A[row, k]
+            k, csr_val = csr_indices[index] , csr_data[index]
+            # csr_val_dag = A[k, row] = A[row, k]*
+            res[row] += csr_val*dense_v[k]
+            res[k] += conj(csr_val)*dense_v[row]
+
+@cython.initializedcheck(False)
+@cython.boundscheck(False)
+@cython.wraparound(False)
+cdef void csr_dense_diagonal_matvec(const double[:] diagonal, const complex[:] dense_v, complex[:] res) noexcept:
+    # [a  0  0 ...   ]  [ v0]
+    # [0  b  0 ...   ]  [ v1]
+    # [.  .  . ...   ]  [ . ]
+    # [0  0  0 ...  n]  [ vn]
+    cdef Py_ssize_t rows = diagonal.shape[0]
+    cdef Py_ssize_t row
+    for row in range(rows):
+            res[row] = diagonal[row]*dense_v[row]
 
 @cython.initializedcheck(False)
 @cython.boundscheck(False)
@@ -34,7 +66,7 @@ cdef void csr_dense_matmat(const complex[:] csr_data, const int[:] csr_indices, 
     cdef Py_ssize_t dense_cols = dense_m.shape[1]
     cdef Py_ssize_t row, k
     cdef Py_ssize_t col, index, indices_start, indices_end
-    cdef complex csr_val, csr_val_dag
+    cdef complex csr_val
     for row in range(csr_rows):
         indices_start, indices_end = csr_index_ptr[row], csr_index_ptr[row + 1]
         for index in range(indices_start, indices_end):
@@ -46,14 +78,55 @@ cdef void csr_dense_matmat(const complex[:] csr_data, const int[:] csr_indices, 
                 res[row, col] += csr_val*dense_m[k, col]
                 # A[k, k] = A[k, k]* = A[k, k], don't add it twice
                 if k != row:
-                    res[k, col] += csr_val_dag*dense_m[row, col]
+                    res[k, col] += conj(csr_val)*dense_m[row, col]
 
-def hermitian_csr_matmat(int csr_nrows, const complex[:] csr_data, const int[:] csr_indices, const int[:] csr_index_ptr, const complex[:, :] dense_m):
-    res = np.zeros((csr_nrows, dense_m.shape[1]), dtype = complex)
+@cython.initializedcheck(False)
+@cython.boundscheck(False)
+@cython.wraparound(False)
+cdef void csr_dense_no_diagonal_matmat(const complex[:] csr_data, const int[:] csr_indices, const int[:] csr_index_ptr, const complex[:, :] dense_m, complex[:, :] res) noexcept:
+    cdef Py_ssize_t csr_rows = res.shape[0]
+    cdef Py_ssize_t dense_cols = dense_m.shape[1]
+    cdef Py_ssize_t row, k
+    cdef Py_ssize_t col, index, indices_start, indices_end
+    cdef complex csr_val
+    for row in range(csr_rows):
+        indices_start, indices_end = csr_index_ptr[row], csr_index_ptr[row + 1]
+        for index in range(indices_start, indices_end):
+            # csr_val = A[row, k]
+            k, csr_val = csr_indices[index] , csr_data[index]
+            # csr_val_dag = A[k, row]*
+            for col in range(dense_cols):
+                res[row, col] += csr_val*dense_m[k, col]
+                res[k, col] += conj(csr_val)*dense_m[row, col]
+
+@cython.initializedcheck(False)
+@cython.boundscheck(False)
+@cython.wraparound(False)
+cdef void csr_dense_diagonal_matmat(const double[:] diagonal, const complex[:, :] dense_m, complex[:, :] res) noexcept:
+    # [a  0  0 ...   ]  [ v00  v01 ... v0m]
+    # [0  b  0 ...   ]  [ v10  v11 ... v1m]
+    # [.  .  . ...   ]  [ .    .   ... .  ]
+    # [0  0  0 ...  n]  [ vn0  vn1 ... vnm]
+    cdef Py_ssize_t rows = diagonal.shape[0]
+    cdef Py_ssize_t cols = dense_m.shape[1]
+    cdef Py_ssize_t row, col
+    for row in range(rows):
+        for col in range(cols):
+            res[row, col] = diagonal[row]*dense_m[row, col]
+
+def hermitian_csr_matmat(int csr_nrows, const double[:] diagonal, const complex[:] csr_data, const int[:] csr_indices, const int[:] csr_index_ptr, const complex[:, :] dense_m):
+    res = np.empty((csr_nrows, dense_m.shape[1]), dtype = complex)
     cdef complex[:, :] res_view = res
-    csr_dense_matmat(csr_data, csr_indices, csr_index_ptr, dense_m, res_view)
+    csr_dense_diagonal_matmat(diagonal, dense_m, res_view)
+    csr_dense_no_diagonal_matmat(csr_data, csr_indices, csr_index_ptr, dense_m, res_view)
     return res
 
+def hermitian_csr_matvec(int csr_nrows, const double[:] diagonal, const complex[:] csr_data, const int[:] csr_indices, const int[:] csr_index_ptr, const complex[:] dense_v):
+    res = np.empty((csr_nrows), dtype = complex)
+    cdef complex[:] res_view = res
+    csr_dense_diagonal_matvec(diagonal, dense_v, res_view)
+    csr_dense_no_diagonal_matvec(csr_data, csr_indices, csr_index_ptr, dense_v, res_view)
+    return res
 
 @cython.initializedcheck(False)
 cpdef void zgemm(
@@ -88,11 +161,16 @@ cpdef void zgemm(
             &ldc
             )
 
-@cython.initializedcheck(False)
-def orthogonalize(complex[:, :] q, complex[:, :] Q):
+# @cython.initializedcheck(False)
+# def orthogonalize(complex[:, :] q, complex[:, :] Q):
+def orthogonalize(q: np.ndarray, Q: np.ndarray):
+    if not q.flags.forc:
+        q = q.copy(order = 'C')
+    if not Q.flags.forc:
+        Q = Q.copy(order = 'C')
     cdef complex[:, :] tmp = np.empty((Q.shape[1], q.shape[1]), dtype = complex)
-    zgemm(ord('C'), ord('N'), 1, Q, q, 0, tmp, False)
-    zgemm(ord('N'), ord('N'), -1, Q, tmp, 1.0, q, False)
+    zgemm(ord('C'), ord('N'), 1, Q, q, 0, tmp, Q.flags.f_contiguous)
+    zgemm(ord('N'), ord('N'), -1, Q, tmp, 1.0, q, Q.flags.f_contiguous)
 
 def dot(a: np.ndarray, b: np.ndarray):
     if not a.flags.forc:
