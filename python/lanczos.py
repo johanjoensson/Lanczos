@@ -149,14 +149,26 @@ def implicit_restart(alphas, betas, Q, k):
     Reduce the number of Krylov vectors by k, removing unwanted eigenvalues from the search space.
     k has to be a multiple of the block size.
     """
+    #      --------------------------
+    #      | a0  b0*                |
+    #      | b0  a1  b1*            |
+    # Tm = |     b1   .   .         |
+    #      |          .   .    bm-1*|
+    #      |              bm-1 am   |   bm*
+    #      --------------------------
+    #                     bm
+
+    # Qm = | q0, q1, ..., qm-1, qm |
+
+    # 
+    
     n = alphas.shape[1]
     assert k % n == 0
 
     N = alphas.shape[0]
-    eigvals = eigsh(alphas, betas, eigvals_only=True)
     Tm = sp.sparse.dia_matrix((n * N, n * N), dtype=alphas.dtype)
     v = np.zeros((N * n, n), dtype=alphas.dtype)
-    rm = Q[:, -n:].copy() @ betas[-k//n - 1]
+    rm = Q[:, -n:].copy() @ betas[-1]
 
     bands = build_banded_matrix(alphas, betas)
     for i in range(n + 1):
@@ -164,8 +176,8 @@ def implicit_restart(alphas, betas, Q, k):
         Tm.setdiag(bands[i], -i)
     Tm = Tm.toarray()
 
-    indices = np.argsort(eigvals)
-    shifts = eigvals[indices[-k:]]
+    eigvals = eigsh(alphas, betas, eigvals_only=True)
+    shifts = np.sort(eigvals)[-k:]
     V = np.identity(Tm.shape[0])
     for sigma in shifts:
         Vi, R = sp.linalg.qr(
@@ -390,8 +402,8 @@ def build_banded_matrix(alphas, betas):
 
 
 def eigsh(alphas, betas, Q=None, eigvals_only=False, select="a", select_range=None):
-    if not eigvals_only:
-        assert Q is not None
+    if not eigvals_only and Q is None:
+        Q = np.identity(alphas.shape[0]*alphas.shape[1])
 
     if alphas.shape[1] == 1:
         if eigvals_only:
@@ -435,15 +447,10 @@ def eigsh(alphas, betas, Q=None, eigvals_only=False, select="a", select_range=No
         return eigvals, Q @ eigvecs
 
 
-def errors_scalar(alphas, betas, k):
-    t, s = la.eigh_tridiagonal(alphas, betas[:-1])
-    return np.abs(betas[-1] * s[-1, :k])
-
-
-def errors_block(alphas, betas, k):
+def calc_errors(alphas, betas, k):
     n = alphas.shape[1]
     try:
-        t, s = eigsh(alphas, betas, np.identity(n * alphas.shape[0]))
+        t, s = eigsh(alphas, betas)
         norms = betas[-1] @ s[-n:, :k]
     except:
         norms = np.array([np.finfo(float).max])
@@ -464,10 +471,8 @@ def converged(alphas, betas, k, tol):
     if n * block_size < k:
         return False
 
-    if len(alphas.shape) == 1:
-        errors = errors_scalar(alphas, betas, k)
-    else:
-        errors = errors_block(alphas, betas, k)
+    errors = calc_errors(alphas, betas, k)
+    print(f"{errors=}")
     return np.all(errors < tol)
 
 
@@ -491,14 +496,15 @@ def implicit_restart_lanczos(A, v0, k=10, max_basis_size=None, tol=np.finfo(floa
 
         if converged(alphas, betas, k, tol=tol):
             break
+
         if max_basis_size is not None and Q.shape[1] > max_basis_size:
             alphas, betas, Q = implicit_restart(alphas, betas, Q, Q.shape[1] - n - k)
             lanczos_it.v_old[:] = Q[:, -2*n:-n]
             lanczos_it.v[:] = Q[:, -n:]
             lanczos_it.beta[:] = betas[-1]
             lanczos_it.i = k
+            eigval, _ = eigsh(alphas, betas)
 
-    print(f"{alphas.shape[0]=}")
     return eigsh(alphas, betas, Q=Q[:, :-n], select="i", select_range=(0, k-1))
 
 
@@ -531,7 +537,7 @@ def test_implicit_restart(
     #     )
     # ).tocsr()
     # A @= A.H
-    eigvals = np.repeat(np.arange(np.ceil(N / max_degeneracy)), max_degeneracy)[:N]
+    eigvals = np.repeat(np.arange(np.ceil(N / max_degeneracy))/N, max_degeneracy)[:N]
     # eigvals = np.arange(1, N + 1)
     # eigvals = 1/(1+np.arange(1, N + 1))
     A = sp.sparse.diags(eigvals, format="csr", dtype=complex)
