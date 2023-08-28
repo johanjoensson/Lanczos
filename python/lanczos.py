@@ -2,37 +2,37 @@ import scipy.linalg as la
 import numpy as np
 import scipy as sp
 
-from lanczos_util import (
-    estimate_orthonormality,
-    hermitian_csr_matvec,
-    hermitian_csr_matmat,
-)
+# from lanczos_util import (
+#     estimate_orthonormality,
+#     hermitian_csr_matvec,
+#     hermitian_csr_matmat,
+# )
 
 
-class Hermitian_operator(sp.sparse.linalg.LinearOperator):
-    def __init__(self, H):
-        self.shape = H.shape
-        self.U = sp.sparse.tril(H, k=-1, format="csr")
-        self.diag = np.real(H.diagonal())
-        self.dtype = H.dtype
-
-    def _matmat(self, m):
-        return hermitian_csr_matmat(
-            self.shape[0], self.diag, self.U.data, self.U.indices, self.U.indptr, m
-        )
-
-    def _matvec(self, v):
-        return hermitian_csr_matvec(
-            self.shape[0],
-            self.diag,
-            self.U.data,
-            self.U.indices,
-            self.U.indptr,
-            v[:, 0],
-        )
-
-    def _adjoint(self):
-        return self
+# class Hermitian_operator(sp.sparse.linalg.LinearOperator):
+#     def __init__(self, H):
+#         self.shape = H.shape
+#         self.U = sp.sparse.tril(H, k=-1, format="csr")
+#         self.diag = np.real(H.diagonal())
+#         self.dtype = H.dtype
+#
+#     def _matmat(self, m):
+#         return hermitian_csr_matmat(
+#             self.shape[0], self.diag, self.U.data, self.U.indices, self.U.indptr, m
+#         )
+#
+#     def _matvec(self, v):
+#         return hermitian_csr_matvec(
+#             self.shape[0],
+#             self.diag,
+#             self.U.data,
+#             self.U.indices,
+#             self.U.indptr,
+#             v[:, 0],
+#         )
+#
+#     def _adjoint(self):
+#         return self
 
 
 class LanczosBasis:
@@ -155,21 +155,16 @@ def implicit_restart(alphas, betas, Q, k):
     N = alphas.shape[0]
     eigvals = eigsh(alphas, betas, eigvals_only=True)
     Tm = sp.sparse.dia_matrix((n * N, n * N), dtype=alphas.dtype)
-    em = np.zeros((N * n, n), dtype=alphas.dtype)
-    em[-n:, :] = np.identity(n)
     v = np.zeros((N * n, n), dtype=alphas.dtype)
     v[-n:, :] = np.identity(n)
-    if n == 1:
-        Tm.setdiag(alphas.flatten(), k=0)
-        Tm.setdiag(betas[:-1].flatten(), k=1)
-        Tm.setdiag(betas[:-1].flatten(), k=-1)
-    else:
-        bands = build_banded_matrix(alphas, betas)
-        for i in range(n + 1):
-            Tm.setdiag(np.conj(bands[i]), i)
-            Tm.setdiag(bands[i], -i)
-    Tm = Tm.todense()
-    np.savetxt("Tm_pre_reort.txt", Tm)
+    rm = Q[:, -n:].copy() @ betas[-1]
+
+    bands = build_banded_matrix(alphas, betas)
+    for i in range(n + 1):
+        Tm.setdiag(np.conj(bands[i]), i)
+        Tm.setdiag(bands[i], -i)
+    Tm = Tm.toarray()
+
     indices = np.argsort(eigvals)
     shifts = eigvals[indices[-k:]]
     V = np.identity(Tm.shape[0])
@@ -181,25 +176,27 @@ def implicit_restart(alphas, betas, Q, k):
         Q[:, :-n] = Q[:, :-n] @ Vi
         v = np.conj((np.conj(v.T) @ Vi).T)
         V = V @ Vi
-    # assert np.allclose(V[-n:, -(K+n):-k], v[-n:])
-    print(f"{k=} {n=}")
-    print(f"{Q.shape=} {Tm.shape=}")
-    rp = Q[:, -k : -k + n] @ betas[-1] + Q[:, -n:] @ V[-n:, -k : -k + n]
-    # rp = Q[:, -k: -k + n] @ Tm[-k:-k+n, -(k+n):-k] + Q[:, -n:] @ v[-n:]
-    # (N, n) x (n, n) + (N, n) x (n, n)
-    # print (f"{v.shape=} {V.shape=}")
-    np.savetxt("Tm_post_reort.txt", Tm)
+    print(
+        "\n".join(
+            [
+                " ".join([f"{el.real: .8f}" for el in row])
+                for row in Tm
+            ]
+        )
+    )
+    print()
+    #     q_k+1             beta_k                rm   Vmk
+    rp = Q[:, -k-n:-k] @ Tm[-k:-k+n, -(k+n):-k] + rm @ V[-n:, -(k+n):-k]
     Tm = Tm[:-k, :-k]
     Q = Q[:, :-k]
     alphas = np.zeros((Tm.shape[0] // n, n, n), dtype=alphas.dtype)
     betas = np.zeros((Tm.shape[0] // n, n, n), dtype=betas.dtype)
     for i in range(Tm.shape[0] // n):
-        alphas[i] = Tm[i * n : (i + 1) * n, i * n : (i + 1) * n]
+        alphas[i] = Tm[i * n: (i + 1) * n, i * n: (i + 1) * n]
         if i > 0:
-            betas[i - 1] = Tm[i * n : (i + 1) * n, (i - 1) * n : i * n]
-    qp, _ = sp.linalg.qr(rp, mode="economic", check_finite=False, overwrite_a=True)
-    print(f"{np.max(np.abs(np.conj(Q.T) @ Q - np.identity(Q.shape[1])))=}")
-    return alphas, betas, Q, qp
+            betas[i - 1] = Tm[i * n: (i + 1) * n, (i - 1) * n: i * n]
+    Q[:, -n:], betas[-1] = sp.linalg.qr(rp, mode="economic", check_finite=False, overwrite_a=True)
+    return alphas, betas, Q
 
 
 def estimate_orthonormality_old(
@@ -496,13 +493,14 @@ def implicit_restart_lanczos(A, v0, k=10, max_basis_size=None, tol=np.finfo(floa
         if converged(alphas, betas, k, tol=tol):
             break
         if max_basis_size is not None and Q.shape[1] > max_basis_size:
-            alphas, betas, Q, q = implicit_restart(alphas, betas, Q, Q.shape[1] - n)
-            lanczos_it.v_old[:] = np.zeros((N, n), dtype=complex)
-            lanczos_it.v[:] = q[:, :n]
-            lanczos_it.beta[:] = np.zeros((n, n), dtype=complex)  # betas[-1]
-            lanczos_it.i = A.shape[0]
+            alphas, betas, Q = implicit_restart(alphas, betas, Q, Q.shape[1] - n - k)
+            lanczos_it.v_old[:] = Q[:, -2*n:-n]
+            lanczos_it.v[:] = Q[:, -n:]
+            lanczos_it.beta[:] = betas[-1]
+            lanczos_it.i = k
 
-    return eigsh(alphas, betas, Q=Q[:, :-n], select="i", select_range=(0, k))
+    print(f"{alphas.shape[0]=}")
+    return eigsh(alphas, betas, Q=Q[:, :-n], select="i", select_range=(0, k-1))
 
 
 def test_implicit_restart(
@@ -514,31 +512,32 @@ def test_implicit_restart(
 
     eps = np.finfo(float).eps
 
-    eigvals = [np.arange(0, N // max_degeneracy)] * max_degeneracy
-    eigvals = np.append(
-        eigvals,
-        [N // max_degeneracy + np.arange((N % max_degeneracy) * max_degeneracy)],
-    )
-    eigvals = np.sort(eigvals)
-    print(f"eigvals.shape = {eigvals.shape}")
-    A = sp.sparse.diags(eigvals)
-    rng = default_rng()
-    rvs = stats.norm(loc=0, scale=100).rvs
-    A = (
-        sp.sparse.random(
-            N, N, density=0.001, dtype=complex, random_state=rng, data_rvs=rvs
-        )
-        + 1j
-        * sp.sparse.random(
-            N, N, density=0.001, dtype=complex, random_state=rng, data_rvs=rvs
-        )
-    ).tocsr()
-    A @= A.H
+    # eigvals = [np.arange(0, N // max_degeneracy)] * max_degeneracy
+    # eigvals = np.append(
+    #     eigvals,
+    #     [N // max_degeneracy + np.arange((N % max_degeneracy) * max_degeneracy)],
+    # )
+    # eigvals = np.sort(eigvals)
+    # print(f"eigvals.shape = {eigvals.shape}")
+    # A = sp.sparse.diags(eigvals)
+    # rng = default_rng()
+    # rvs = stats.norm(loc=0, scale=100).rvs
+    # A = (
+    #     sp.sparse.random(
+    #         N, N, density=0.001, dtype=complex, random_state=rng, data_rvs=rvs
+    #     )
+    #     + 1j
+    #     * sp.sparse.random(
+    #         N, N, density=0.001, dtype=complex, random_state=rng, data_rvs=rvs
+    #     )
+    # ).tocsr()
+    # A @= A.H
     eigvals = np.repeat(np.arange(np.ceil(N / max_degeneracy)), max_degeneracy)[:N]
     # eigvals = np.arange(1, N + 1)
     # eigvals = 1/(1+np.arange(1, N + 1))
     A = sp.sparse.diags(eigvals, format="csr", dtype=complex)
-    hamiltonian = Hermitian_operator(A)
+    hamiltonian = A
+    # hamiltonian = Hermitian_operator(A)
     init_block = np.random.rand(N, n) + 1j * np.random.rand(N, n)
     init_block[:, 0] = 1
     v0, _ = sp.linalg.qr(init_block, mode="full", overwrite_a=True, check_finite=False)
@@ -546,7 +545,8 @@ def test_implicit_restart(
 
     eigvals = np.sort(eigvals)
     eigvals_ir, eigvecs_ir = implicit_restart_lanczos(A, v0, k, max_basis_size, tol)
-    print(f"{np.max(np.abs(eigvals[:k] - eigvals_ir))}")
+    print(f"{eigvals[:k]=}")
+    print(f"{eigvals_ir[:k]=}")
 
 
 def bench_lanczos(
