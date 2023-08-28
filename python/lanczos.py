@@ -156,8 +156,7 @@ def implicit_restart(alphas, betas, Q, k):
     eigvals = eigsh(alphas, betas, eigvals_only=True)
     Tm = sp.sparse.dia_matrix((n * N, n * N), dtype=alphas.dtype)
     v = np.zeros((N * n, n), dtype=alphas.dtype)
-    v[-n:, :] = np.identity(n)
-    rm = Q[:, -n:].copy() @ betas[-1]
+    rm = Q[:, -n:].copy() @ betas[-k//n - 1]
 
     bands = build_banded_matrix(alphas, betas)
     for i in range(n + 1):
@@ -174,19 +173,19 @@ def implicit_restart(alphas, betas, Q, k):
         )
         Tm = np.conj(Vi.T) @ Tm @ Vi
         Q[:, :-n] = Q[:, :-n] @ Vi
-        v = np.conj((np.conj(v.T) @ Vi).T)
         V = V @ Vi
     print(
         "\n".join(
             [
                 " ".join([f"{el.real: .8f}" for el in row])
-                for row in Tm
+                for row in V[-n:]
             ]
         )
     )
     print()
-    #     q_k+1             beta_k                rm   Vmk
-    rp = Q[:, -k-n:-k] @ Tm[-k:-k+n, -(k+n):-k] + rm @ V[-n:, -(k+n):-k]
+    print(f"{V[-n:, -k-n:-k]=}")
+    #     q_k+1             beta_k                  rm      Vmk
+    rp = Q[:, -k-n:-k] @ Tm[-k:-k+n, -k-n:-k] + rm @ V[-n:, -k-n:-k]
     Tm = Tm[:-k, :-k]
     Q = Q[:, :-k]
     alphas = np.zeros((Tm.shape[0] // n, n, n), dtype=alphas.dtype)
